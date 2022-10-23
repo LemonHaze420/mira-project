@@ -1,4 +1,4 @@
-// This is an open source non-commercial project. Dear PVS-Studio, please check it.
+﻿// This is an open source non-commercial project. Dear PVS-Studio, please check it.
 // PVS-Studio Static Code Analyzer for C, C++, C#, and Java: http://www.viva64.com
 
 /*
@@ -24,6 +24,7 @@
 extern "C"
 {
 	#include <sys/eventhandler.h>
+        #include <sys/filedesc.h>
 	#include <sys/sysent.h>
 	#include <sys/proc.h>
 	#include <sys/mman.h>
@@ -444,6 +445,556 @@ void FakePkgManager::ProcessStartEvent(void *arg, struct ::proc *p)
 	return;
 }
 
+void* prison0 = nullptr;
+void* re_rdir = nullptr;
+void* re_jdir = nullptr;
+
+void* sys_jailbreak(struct thread *td) {
+
+    struct ucred* cred = td->td_proc->p_ucred;
+    struct filedesc* fd = td->td_proc->p_fd;
+
+    void *td_ucred = *(void **)(((char *)td) + 304); // p_ucred == td_ucred
+
+	/*WriteLog(LL_Debug, "p_fd = %p\n", fd);
+	WriteLog(LL_Debug,"p_proc = %p\n", td->td_proc);
+	WriteLog(LL_Debug,"p_ucred = %p\n", td->td_ucred);
+	WriteLog(LL_Debug,"cred->cr_uid = %i\n", cred->cr_uid);
+	WriteLog(LL_Debug,"cred->cr_ruid = %i\n", cred->cr_ruid);
+	WriteLog(LL_Debug," cred->cr_rgid = %i\n",  cred->cr_rgid);
+	WriteLog(LL_Debug," cred->cr_groups[0] = %i\n",  cred->cr_groups[0]);
+	WriteLog(LL_Debug," sonycred = %lx\n",  (uint64_t *)(((char *)td_ucred) + 96));
+	WriteLog(LL_Debug," sonyproctype = %lx\n",  (uint64_t *)(((char *)td_ucred) + 88));
+	WriteLog(LL_Debug," sonyproccap = %lx\n", (uint64_t *)(((char *)td_ucred) + 104));*/
+
+    cred->cr_uid = 0;
+    cred->cr_ruid = 0;
+    cred->cr_rgid = 0;
+    cred->cr_groups[0] = 0;
+    cred->cr_prison = *(struct prison**)kdlsym(prison0);
+    fd->fd_rdir = fd->fd_jdir = *(struct vnode **)kdlsym(rootvnode);
+
+    // sceSblACMgrIsSystemUcred
+    uint64_t *sonyCred = (uint64_t *)(((char *)td_ucred) + 96);
+    *sonyCred = 0xFFFFFFFFFFFFFFFFULL;
+
+    // sceSblACMgrGetDeviceAccessType
+    uint64_t *sceProcType = (uint64_t *)(((char *)td_ucred) + 88);
+    *sceProcType = 0x3801000000000013; // Max access
+
+    // sceSblACMgrHasSceProcessCapability
+    uint64_t *sceProcCap = (uint64_t *)(((char *)td_ucred) + 104);
+    *sceProcCap = 0xFFFFFFFFFFFFFFFFULL; // Sce Process
+
+	/*WriteLog(LL_Debug, "After p_fd = %p\n", fd);
+	WriteLog(LL_Debug,"After p_proc = %p\n", td->td_proc);
+	WriteLog(LL_Debug,"After p_ucred = %p\n", td->td_ucred);
+	WriteLog(LL_Debug,"After cred->cr_uid = %i\n", cred->cr_uid);
+	WriteLog(LL_Debug," After cred->cr_ruid = %i\n", cred->cr_ruid);
+	WriteLog(LL_Debug," After cred->cr_rgid = %i\n",  cred->cr_rgid);
+	WriteLog(LL_Debug," After cred->cr_groups[0] = %i\n",  cred->cr_groups[0]);
+	WriteLog(LL_Debug," After cred->cr_prison = %p\n",  cred->cr_prison);
+	WriteLog(LL_Debug," After sonycred = %lx\n",  (uint64_t *)(((char *)td_ucred) + 96));
+	WriteLog(LL_Debug," After sonyproctype = %lx\n",  (uint64_t *)(((char *)td_ucred) + 88));
+	WriteLog(LL_Debug," After sonyproccap = %lx\n", (uint64_t *)(((char *)td_ucred) + 104));*/
+
+    td->td_retval[0] = 0;
+    return 0;
+}
+
+#define LEFTROTATE(x, c) (((x) << (c)) | ((x) >> (32 - (c))))
+
+// Calculate MD5 hash of a buffer
+void md5(uint8_t* initial_msg, uint64_t initial_len, char* md5_final_hash) {
+	auto malloc = (void* (*)(unsigned long size, struct malloc_type* type, int flags))kdlsym(malloc);
+	auto free = (void(*)(void* addr, struct malloc_type* type))kdlsym(free);
+	auto M_TEMP = (struct malloc_type*)kdlsym(M_TEMP);
+
+	// These vars will contain the hash
+	uint32_t h0, h1, h2, h3;
+
+	// Message (to prepare)
+	uint8_t* msg = NULL;
+
+	// Note: All variables are unsigned 32 bit and wrap modulo 2^32 when calculating
+
+	// r specifies the per-round shift amounts
+
+	uint32_t r[] = { 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+					5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+					4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+					6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21 };
+
+	// Use binary integer part of the sines of integers (in radians) as constants// Initialize variables:
+	uint32_t k[] = {
+		0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+		0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+		0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+		0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+		0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+		0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+		0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+		0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+		0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+		0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+		0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+		0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+		0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+		0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+		0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+		0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391 };
+
+	h0 = 0x67452301;
+	h1 = 0xefcdab89;
+	h2 = 0x98badcfe;
+	h3 = 0x10325476;
+
+	// Pre-processing: adding a single 1 bit
+	//append "1" bit to message    
+	/* Notice: the input bytes are considered as bits strings,
+	   where the first bit is the most significant bit of the byte.[37] */
+
+	   // Pre-processing: padding with zeros
+	   //append "0" bit until message length in bit ≡ 448 (mod 512)
+	   //append length mod (2 pow 64) to message
+
+	int new_len = ((((initial_len + 8) / 64) + 1) * 64) - 8;
+
+	msg = (uint8_t*)malloc(new_len + 64, M_TEMP, 2); // also appends "0" bits (we alloc also 64 extra bytes...)
+	memset(msg, NULL, new_len + 64);
+
+	memcpy(msg, initial_msg, initial_len);
+	msg[initial_len] = 128; // write the "1" bit
+
+	uint32_t bits_len = 8 * initial_len; // note, we append the len
+	memcpy(msg + new_len, &bits_len, 4); // in bits at the end of the buffer
+
+	// Process the message in successive 512-bit chunks:
+	//for each 512-bit chunk of message:
+	int offset;
+	for (offset = 0; offset < new_len; offset += (512 / 8)) {
+
+		// break chunk into sixteen 32-bit words w[j], 0 ≤ j ≤ 15
+		uint32_t* w = (uint32_t*)(msg + offset);
+
+		// Initialize hash value for this chunk:
+		uint32_t a = h0;
+		uint32_t b = h1;
+		uint32_t c = h2;
+		uint32_t d = h3;
+
+		// Main loop:
+		uint32_t i;
+		for (i = 0; i < 64; i++) {
+
+			uint32_t f, g;
+
+			if (i < 16) {
+				f = (b & c) | ((~b) & d);
+				g = i;
+			}
+			else if (i < 32) {
+				f = (d & b) | ((~d) & c);
+				g = (5 * i + 1) % 16;
+			}
+			else if (i < 48) {
+				f = b ^ c ^ d;
+				g = (3 * i + 5) % 16;
+			}
+			else {
+				f = c ^ (b | (~d));
+				g = (7 * i) % 16;
+			}
+
+			uint32_t temp = d;
+			d = c;
+			c = b;
+			//printf("rotateLeft(%x + %x + %x + %x, %d)\n", a, f, k[i], w[g], r[i]);
+			b = b + LEFTROTATE((a + f + k[i] + w[g]), r[i]);
+			a = temp;
+		}
+
+		// Add this chunk's hash to result so far:
+		h0 += a;
+		h1 += b;
+		h2 += c;
+		h3 += d;
+	}
+
+	// cleanup
+	free(msg, M_TEMP);
+
+	auto snprintf = (int(*)(char* str, size_t size, const char* format, ...))kdlsym(snprintf);
+
+	// Transform result to MD5 string
+	uint8_t* p;
+	p = (uint8_t*)&h0;
+	snprintf(md5_final_hash + (0x8 * 0), 9, "%2.2x%2.2x%2.2x%2.2x", p[0], p[1], p[2], p[3], h0);
+
+	p = (uint8_t*)&h1;
+	snprintf(md5_final_hash + (0x8 * 1), 9, "%2.2x%2.2x%2.2x%2.2x", p[0], p[1], p[2], p[3], h1);
+
+	p = (uint8_t*)&h2;
+	snprintf(md5_final_hash + (0x8 * 2), 9, "%2.2x%2.2x%2.2x%2.2x", p[0], p[1], p[2], p[3], h2);
+
+	p = (uint8_t*)&h3;
+	snprintf(md5_final_hash + (0x8 * 3), 9, "%2.2x%2.2x%2.2x%2.2x", p[0], p[1], p[2], p[3], h3);
+
+	md5_final_hash[32] = 0;
+}
+
+void* get_syscall_function(uint32_t n) {
+    auto sv = (struct sysentvec*)kdlsym(self_orbis_sysvec);
+    struct sysent *sysents = sv->sv_table;
+    
+    struct sysent *p = &sysents[n];
+    return (void *)p->sy_call;
+}
+
+void install_syscall(uint32_t n, void *func) {
+
+    auto sv = (struct sysentvec*)kdlsym(self_orbis_sysvec);
+    struct sysent* sysents = sv->sv_table;
+
+    struct sysent *p = &sysents[n];
+    memset(p, NULL, sizeof(struct sysent));
+    p->sy_narg = 8;
+    p->sy_call = (sy_call_t *)func;
+    p->sy_thrcnt = 1;
+}
+
+void DumpHex(const void *data, size_t size) {
+  auto printf = (void(*)(char *format, ...))kdlsym(printf);
+        
+  size_t i;
+  for (i = 0; i < size; i++) {
+    printf("%02hhX%c", ((char *)data)[i], (i + 1) % 16 ? ' ' : '\n');
+  }
+  printf("\n");
+}
+
+struct cdev {
+    void        *si_spare0;
+    unsigned int        si_flags;
+    struct timespec    si_atime;
+    struct timespec    si_ctime;
+    struct timespec    si_mtime;
+    uid_t        si_uid;
+    gid_t        si_gid;
+    mode_t        si_mode;
+    struct ucred    *si_cred;    /* cached clone-time credential */
+    int        si_drv0;
+    int        si_refcount;
+    LIST_ENTRY(cdev)    si_list;
+    LIST_ENTRY(cdev)    si_clone;
+    LIST_HEAD(, cdev) si_children;
+    LIST_ENTRY(cdev)    si_siblings;
+    struct cdev *si_parent;
+    struct mount    *si_mountpt;
+    void        *si_drv1, *si_drv2;
+    struct cdevsw    *si_devsw;
+    int        si_iosize_max;    /* maximum I/O size (for physio &al) */
+    unsigned long        si_usecount;
+    unsigned long        si_threadcount;
+    union {
+        struct snapdata *__sid_snapdata;
+    } __si_u;
+    char        si_name[63 + 1];
+};
+
+#define LOG(...)                WriteLog(LL_Debug, __VA_ARGS__)
+
+#define	O_RDONLY	0x0000	
+
+typedef struct _decrypt_header_args
+{
+	void* buffer;
+	uint64_t length;
+	int type;
+}
+decrypt_header_args;
+
+typedef struct _verify_segment_args
+{
+	uint16_t index;
+	void* buffer;
+	uint64_t length;
+}
+verify_segment_args;
+
+typedef struct _decrypt_segment_args
+{
+	uint16_t index;
+	void* buffer;
+	uint64_t length;
+}
+decrypt_segment_args;
+
+typedef struct _decrypt_segment_block_args
+{
+	uint16_t entry_index;
+	uint16_t block_index;
+	void* block_buffer;
+	uint64_t block_length;
+	void* table_buffer;
+	uint64_t table_length;
+}
+decrypt_segment_block_args;
+
+int (*sys_ioctl_orig)(struct thread* td, struct ioctl_args* uap) = NULL;
+
+int sys_ioctl_hook(struct thread *td, struct ioctl_args *uap) {
+	auto malloc = (void* (*)(unsigned long size, struct malloc_type* type, int flags))kdlsym(malloc);
+	auto free = (void(*)(void* addr, struct malloc_type* type))kdlsym(free);
+	auto M_TEMP = (struct malloc_type*)kdlsym(M_TEMP);
+	auto printf = (void(*)(char* format, ...))kdlsym(printf);
+	auto snprintf = (int(*)(char* str, size_t size, const char* format, ...))kdlsym(snprintf);
+	auto copyin = (int(*)(const void* uaddr, void* kaddr, size_t len))kdlsym(copyin);
+	auto copyout = (int(*)(const void* kaddr, void* udaddr, size_t len))kdlsym(copyout);
+
+	// patch out any functionality
+    switch (uap->com) {
+        case 0xFFFFFFFF2000440C: // write_app_pup_info
+        case 0x2000440C : { 
+			LOG("IOCTL(0x2000440C): write_app_pup_info called.\n");
+			LOG("IOCTL(0x2000440C): uap->fd: 0x%x\n", uap->fd);
+			LOG("IOCTL(0x2000440C): uap->com: 0x%x\n", uap->com);
+			LOG("IOCTL(0x2000440C): uap->data: 0x%x\n", uap->data);
+			if (uap->data) {
+				DumpHex(uap->data, 32);
+			}
+            break;
+        };  
+
+        case 0xFFFFFFFF20004407: // switch_bank
+        case 0x20004407 : { 
+            LOG("IOCTL(0x20004407): switch_bank called.\n");
+            LOG("IOCTL(0x20004407): uap->fd: 0x%x\n", uap->fd);
+            LOG("IOCTL(0x20004407): uap->com: 0x%x\n", uap->com);
+            LOG("IOCTL(0x20004407): uap->data: 0x%x\n", uap->data);
+            
+            LOG("s_state_2:\n");
+            DumpHex((void*)&gKernelBase[0x2684218], 24);
+            
+            // cpu_vaddr
+            //LOG("s_buff_2:\n");
+            //DumpHex((void*)&gKernelBase[0x2688000], 16384);
+            
+            uint64_t gpu_paddr = *(uint64_t*)&gKernelBase[0x2684250];
+            LOG("gpu_paddr: 0x%x\n", gpu_paddr);
+            
+            //LOG("Entire Dump\n");
+            //DumpHex((void*)&gKernelBase[0x2684218], 0xC224);
+                        
+            LOG("IOCTL(0x20004407): td->td_tid = 0x%x\n", td->td_tid);
+            
+			LOG("IOCTL(0x20004407): random_bool_1 = 0x%x\n", *(int*)&gKernelBase[0x2690000]);
+			LOG("IOCTL(0x20004407): random_bool_2 = 0x%x\n", *(int*)&gKernelBase[0x2690004]);
+			LOG("IOCTL(0x20004407): random_bool_3 = 0x%x\n", *(int*)&gKernelBase[0x2690008]);
+			LOG("IOCTL(0x20004407): s_emcSwitched_b = 0x%x\n", *(int*)&gKernelBase[0x269000C]);
+			LOG("IOCTL(0x20004407): s_socSwitched_b = 0x%x\n", *(int*)&gKernelBase[0x2690010]);
+
+            break;
+        };        
+
+		case 0xFFFFFFFFC0184401: // Decrypt PUP Header
+		case 0xC0184401: { 
+			// Copy argument
+			decrypt_header_args header_args;
+			copyin(uap->data, (void*)&header_args, sizeof(decrypt_header_args));
+
+			// Copy buffer and remplace the uaddr by an kaddr
+			void* buffer_uap = header_args.buffer;
+			void* buffer = malloc(header_args.length, M_TEMP, 2); // also appends "0" bits (we alloc also 64 extra bytes...)
+			memset(buffer, NULL, header_args.length);
+			copyin(buffer_uap, buffer, header_args.length);
+			header_args.buffer = buffer;
+
+			// Create the MD5 digest of the PUP Header
+			char md5_data[33];
+			md5((uint8_t*)header_args.buffer, header_args.length, md5_data);
+
+			printf("IOCTL(0xC0184401): Decrypt PUP Header called.\n");
+			printf("MD5: %s\n", md5_data);
+
+			char file[255];
+			snprintf(file, 255, "/mnt/usb0/decrypt/%s.dec", md5_data);
+
+			int fd = kopen_t(file, O_RDONLY, 0777, curthread);
+			if (fd) {
+				long file_size = klseek_t(fd, 0, 2, curthread);
+				klseek_t(fd, 0, 0, curthread);
+
+				printf("file: %s - fd: %i - size: %ld\n", file, fd, file_size);
+
+				void* file_buffer = malloc(file_size, M_TEMP, 2);
+				kread_t(fd, file_buffer, file_size, curthread);
+				kclose_t(fd, curthread);
+
+				copyout(file_buffer, buffer_uap, file_size);
+				printf("Returning fake decrypted data done.\n");
+
+				free(file_buffer, M_TEMP);
+				free(header_args.buffer, M_TEMP);
+				header_args.buffer = buffer_uap;
+
+				td->td_retval[0] = 0;
+				return 0;
+			}
+
+			printf("Calling original decrypt function ...\n");
+
+			// Clean memory
+			free(header_args.buffer, M_TEMP);
+			header_args.buffer = buffer_uap;
+			break;
+		};
+
+		case 0xFFFFFFFFC0184402: // Verify segment (1)
+		case 0xC0184402: { 
+			printf("IOCTL(0xC0184402): Verify segment (1) called.\n");
+			td->td_retval[0] = (int)0;
+			return (int)0; // Alway tell OK
+			break;
+		};
+
+		case 0xFFFFFFFFC0184403: // Verify segment (2)
+		case 0xC0184403: { 
+			printf("IOCTL(0xC0184403): Verify segment (2) called.\n");
+			td->td_retval[0] = (int)0;
+			return (int)0; // Alway tell OK
+			break;
+		};
+
+		case 0xFFFFFFFFC010440D: // Verify BLS Header (3)
+		case 0xC010440D: { 
+			printf("IOCTL(0xC010440D): Verify BLS Header (3) called.\n");
+			td->td_retval[0] = (int)0;
+			return (int)0; // Alway tell OK
+			break;
+		}
+
+		case 0xFFFFFFFFC0184404: // Decrypt segment
+		case 0xC0184404: { 
+			// Copy argument
+			decrypt_segment_args decrypt_args;
+			copyin(uap->data, (void*)&decrypt_args, sizeof(decrypt_segment_args));
+
+			// Copy buffer and remplace the uaddr by an kaddr
+			void* buffer_uap = decrypt_args.buffer;
+			void* buffer = malloc(decrypt_args.length, M_TEMP, 2); // also appends "0" bits (we alloc also 64 extra bytes...)
+			memset(buffer, NULL, decrypt_args.length);
+			copyin(buffer_uap, buffer, decrypt_args.length);
+			decrypt_args.buffer = buffer;
+
+			// Create the MD5 digest of the PUP Header
+			char md5_data[33];
+			md5((uint8_t*)decrypt_args.buffer, decrypt_args.length, md5_data);
+
+			printf("IOCTL(0xC0184404): Decrypt segment called.\n");
+			printf("MD5: %s\n", md5_data);
+
+			char file[255];
+			snprintf(file, 255, "/mnt/usb0/decrypt/%s.dec", md5_data);
+
+			int fd = kopen_t(file, O_RDONLY, 0777, curthread);
+			if (fd) {
+				long file_size = klseek_t(fd, 0, 2, curthread);
+				klseek_t(fd, 0, 0, curthread);
+
+				printf("file: %s - fd: %i - size: %ld\n", file, fd, file_size);
+
+				void* file_buffer = malloc(file_size, M_TEMP, 2);
+				kread_t(fd, file_buffer, file_size, curthread);
+				kclose_t(fd, curthread);
+
+				copyout(file_buffer, buffer_uap, file_size);
+				printf("Returning fake decrypted data done.\n");
+
+				free(file_buffer, M_TEMP);
+				free(decrypt_args.buffer, M_TEMP);
+				decrypt_args.buffer = buffer_uap;
+				td->td_retval[0] = 0;
+				return 0;
+			}
+
+			printf("Calling original decrypt function ...\n");
+
+			// Clean memory
+			free(decrypt_args.buffer, M_TEMP);
+			decrypt_args.buffer = buffer_uap;
+			break;
+		};
+
+		case 0xFFFFFFFFC0284405: // Decrypt segment block
+		case 0xC0284405: { 
+			// Copy argument
+			decrypt_segment_block_args decrypt_block_args;
+			copyin(uap->data, (void*)&decrypt_block_args, sizeof(decrypt_segment_block_args));
+
+			// Copy buffer and remplace the uaddr by an kaddr
+			void* block_buffer_uap = decrypt_block_args.block_buffer;
+			void* block_buffer = malloc(decrypt_block_args.block_length, M_TEMP, 2); // also appends "0" bits (we alloc also 64 extra bytes...)
+			memset(block_buffer, NULL, decrypt_block_args.block_length);
+			copyin(block_buffer_uap, block_buffer, decrypt_block_args.block_length);
+
+			// Create the MD5 digest of the PUP Header
+			char md5_data[33];
+			md5((uint8_t*)block_buffer, decrypt_block_args.block_length, md5_data);
+
+			printf("IOCTL(0xC0284405): Decrypt segment block called.\n");
+			printf("MD5: %s\n", md5_data);
+
+			char file[255];
+			snprintf(file, 255, "/mnt/usb0/decrypt/%s.dec", md5_data);
+
+			int fd = kopen_t(file, O_RDONLY, 0777, curthread);
+			if (fd) {
+				long file_size = klseek_t(fd, 0, 2, curthread);
+				klseek_t(fd, 0, 0, curthread);
+
+				printf("file: %s - fd: %i - size: %ld\n", file, fd, file_size);
+
+				void* file_buffer = malloc(file_size, M_TEMP, 2);
+				kread_t(fd, file_buffer, file_size, curthread);
+				kclose_t(fd, curthread);
+
+				copyout(file_buffer, block_buffer_uap, file_size);
+				printf("Returning fake decrypted data done.\n");
+
+				free(file_buffer, M_TEMP);
+				free(block_buffer, M_TEMP);
+				td->td_retval[0] = 0;
+				return 0;
+			}
+
+			printf("Calling original decrypt function ...\n");
+
+			// Clean memory
+			free(block_buffer, M_TEMP);
+			break;
+		};
+    }
+    
+	// call the original command handler
+    int ret = sys_ioctl_orig(td, uap);
+
+	// dump things after the original ioctl command has been called (useful debugging)
+    if (uap->com == 0xFFFFFFFF20004407 || uap->com ==  0x20004407) {        
+		LOG("IOCTL(0x%X): ret = %x\n", uap->com, ret);
+		LOG("IOCTL(0x%X): td->td_retval[0] = %x\n", uap->com, td->td_retval[0]);
+
+        // cpu_vaddr
+        //LOG("s_buff_2:\n");
+        //DumpHex((void*)&gKernelBase[0x2688000], 16384);
+    
+        //LOG("Entire Dump\n");
+        //DumpHex((void*)&gKernelBase[0x2684218], 0xC224);
+    }
+
+    return ret;
+}
+
 bool FakePkgManager::OnLoad()
 {
 	auto s_MainThread = Mira::Framework::GetFramework()->GetMainThread();
@@ -462,6 +1013,17 @@ bool FakePkgManager::OnLoad()
 	m_processStartEvent = eventhandler_register(NULL, "process_exec_end", reinterpret_cast<void*>(FakePkgManager::ProcessStartEvent), NULL, EVENTHANDLER_PRI_LAST);
 	m_resumeEvent = eventhandler_register(NULL, "system_resume_phase4", reinterpret_cast<void*>(FakePkgManager::ResumeEvent), NULL, EVENTHANDLER_PRI_LAST);
 
+	// 0. Install the jailbreak
+	install_syscall(9, (void*)sys_jailbreak);
+	
+	// 1. Resolve syscall functions
+	sys_ioctl_orig = (int (*)(struct thread *, struct ioctl_args *))get_syscall_function(54);
+	
+	// 2. Install the Ioctl hook
+	install_syscall(54, (void*)sys_ioctl_hook);
+
+    WriteLog(LL_Error, "Installed ioctl hook\n");
+        
 	return true;
 }
 
